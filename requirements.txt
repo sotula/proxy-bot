@@ -1,5 +1,6 @@
-botbuilder-core==4.14.1
-botbuilder-schema==4.14.1
 flask
 requests
 python-dotenv
+aiohttp==3.8.6
+botbuilder-core==4.14.1
+botbuilder-schema==4.14.1
