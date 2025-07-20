@@ -32,6 +32,7 @@ bot = LambdaBot()
 
 @app.route("/api/messages", methods=["POST"])
 def messages():
+    print("✅ Received a POST request from Teams!")
     if "application/json" not in request.headers.get("Content-Type", ""):
         return Response(status=415)
     activity = Activity().deserialize(request.json)
