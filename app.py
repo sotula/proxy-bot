@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
 from botbuilder.schema import Activity
 import asyncio
+from collections import defaultdict, deque
 
 load_dotenv()
 
@@ -17,16 +18,39 @@ LAMBDA_URL = os.getenv("LAMBDA_URL")
 adapter_settings = BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD)
 adapter = BotFrameworkAdapter(adapter_settings)
 
+# Holds up to 6 recent (user, bot) message pairs per conversation
+message_history = defaultdict(lambda: deque(maxlen=6))
+
 class LambdaBot:
     async def on_turn(self, turn_context: TurnContext):
-        if turn_context.activity.type == "message":
-            user_input = turn_context.activity.text
-            try:
-                response = requests.post(LAMBDA_URL, json={"text": user_input})
-                reply_text = response.text
-            except Exception as e:
-                reply_text = f"Lambda error: {str(e)}"
-            await turn_context.send_activity(reply_text)
+        if turn_context.activity.type != "message":
+            return
+
+        user_input = turn_context.activity.text
+        conversation_id = turn_context.activity.conversation.id
+
+        # Get previous history
+        history = message_history[conversation_id]
+
+        # Build history list of dicts for sending
+        history_payload = [{"user": u, "bot": b} for u, b in history]
+
+        # Compose request payload
+        payload = {
+            "text": user_input,
+            "history": history_payload
+        }
+
+        try:
+            response = requests.post(LAMBDA_URL, json=payload)
+            reply_text = response.text
+        except Exception as e:
+            reply_text = f"Lambda error: {str(e)}"
+
+        # Save new message to history
+        history.append((user_input, reply_text))
+
+        await turn_context.send_activity(reply_text)
 
 bot = LambdaBot()
 
