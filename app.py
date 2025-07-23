@@ -44,7 +44,7 @@ class LambdaBot:
         try:
             response = requests.post(LAMBDA_URL, json=payload)
             reply_text = response.text
-            reply_text = reply_text.encode('utf-8').decode('unicode_escape')
+            reply_text = json.loads(reply_text)['text'].encode('utf-8').decode('unicode_escape')
         except Exception as e:
             reply_text = f"Lambda error: {str(e)}"
 
