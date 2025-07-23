@@ -19,7 +19,7 @@ adapter_settings = BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD)
 adapter = BotFrameworkAdapter(adapter_settings)
 
 # Holds up to 6 recent (user, bot) message pairs per conversation
-message_history = defaultdict(lambda: deque(maxlen=6))
+message_history = defaultdict(lambda: deque(maxlen=5))
 
 class LambdaBot:
     async def on_turn(self, turn_context: TurnContext):
@@ -33,7 +33,7 @@ class LambdaBot:
         history = message_history[conversation_id]
 
         # Build history list of dicts for sending
-        history_payload = [{"user": u, "bot": b} for u, b in history[-5:]]
+        history_payload = [{"user": u, "bot": b} for u, b in history]
 
         # Compose request payload
         payload = {
