@@ -33,7 +33,7 @@ class LambdaBot:
         history = message_history[conversation_id]
 
         # Build history list of dicts for sending
-        history_payload = [{"user": u, "bot": b} for u, b in history]
+        history_payload = [{"user": u, "bot": b} for u, b in history[-5:]]
 
         # Compose request payload
         payload = {
@@ -44,6 +44,7 @@ class LambdaBot:
         try:
             response = requests.post(LAMBDA_URL, json=payload)
             reply_text = response.text
+            reply_text = reply_text.encode('utf-8').decode('unicode_escape')
         except Exception as e:
             reply_text = f"Lambda error: {str(e)}"
 
