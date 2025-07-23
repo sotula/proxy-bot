@@ -1,5 +1,6 @@
 import os
 import requests
+import json
 from flask import Flask, request, Response
 from dotenv import load_dotenv
 from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
