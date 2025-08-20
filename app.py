@@ -3,10 +3,17 @@ import requests
 import json
 from flask import Flask, request, Response
 from dotenv import load_dotenv
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
+from botbuilder.core import TurnContext
 from botbuilder.schema import Activity
-from botbuilder.core import CloudAdapter, TurnContext
-from botbuilder.core.auth import ConfigurationServiceClientCredentialFactory
+
+# ✅ CloudAdapter + auth factory come from integration.aiohttp
+from botbuilder.integration.aiohttp.cloud_adapter import CloudAdapter
+from botbuilder.integration.aiohttp.configuration_service_client_credential_factory import (
+    ConfigurationServiceClientCredentialFactory,
+)
+from botbuilder.integration.aiohttp.configuration_bot_framework_authentication import (
+    ConfigurationBotFrameworkAuthentication,
+)
 import asyncio
 from collections import defaultdict, deque
 
@@ -16,20 +23,20 @@ app = Flask(__name__)
 
 APP_ID = os.getenv("MICROSOFT_APP_ID")
 APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
+APP_TENANT_ID = os.getenv("MICROSOFT_APP_TENANT_ID")
+APP_TYPE = os.getenv("MICROSOFT_APP_TYPE", "SingleTenant")
 LAMBDA_URL = os.getenv("LAMBDA_URL")
 
-# For single-tenant apps you MUST also set these:
-APP_TENANT_ID = os.getenv("MICROSOFT_APP_TENANT_ID")  # e.g. "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-APP_TYPE = os.getenv("MICROSOFT_APP_TYPE", "SingleTenant")  # "SingleTenant" or "MultiTenant"
 
-creds_factory = ConfigurationServiceClientCredentialFactory(
-    APP_ID,
-    APP_PASSWORD,
-    APP_TENANT_ID,   # required when SingleTenant
-    APP_TYPE,
-)
+creds_factory = ConfigurationServiceClientCredentialFactory({
+    "MicrosoftAppId": APP_ID,
+    "MicrosoftAppPassword": APP_PASSWORD,
+    "MicrosoftAppTenantId": APP_TENANT_ID,
+    "MicrosoftAppType": APP_TYPE,  # "SingleTenant" or "MultiTenant"
+})
 
-adapter = CloudAdapter(creds_factory)
+bot_auth = ConfigurationBotFrameworkAuthentication(configuration={}, credentials_factory=creds_factory)
+adapter = CloudAdapter(bot_auth)  # inherits CloudAdapterBase → has process_activity(...)
 
 # adapter_settings = BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD)
 # adapter = BotFrameworkAdapter(adapter_settings)
