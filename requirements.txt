@@ -4,4 +4,4 @@ python-dotenv
 botbuilder-core==4.17.0
 botbuilder-schema==4.17.0
 botbuilder-integration-aiohttp==4.17.0
-aiohttp>=3.10,<4.0   # satisfies 4.17.0’s range
+aiohttp>=3.10,<4.0
