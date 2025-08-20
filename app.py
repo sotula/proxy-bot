@@ -85,7 +85,14 @@ def messages():
     auth_header = request.headers.get("Authorization", "")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    task = loop.create_task(adapter.process_activity(activity, auth_header, bot.on_turn))
+    # or explicit keywords (hard to get wrong)
+    task = loop.create_task(
+        adapter.process_activity(
+            auth_header_or_authenticate_request_result=auth_header,
+            activity=activity,
+            logic=bot.on_turn,
+        )
+    )
     loop.run_until_complete(task)
     return Response(status=200)
 
