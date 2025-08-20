@@ -17,17 +17,22 @@ load_dotenv()
 app = Flask(__name__)
 
 LAMBDA_URL = os.getenv("LAMBDA_URL")
-APP_ID = os.getenv("MICROSOFT_APP_ID")
-APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
-APP_TENANT_ID = os.getenv("MICROSOFT_APP_TENANT_ID")
-APP_TYPE = os.getenv("MICROSOFT_APP_TYPE", "SingleTenant")  # or MultiTenant
+# APP_ID = os.getenv("MICROSOFT_APP_ID")
+# APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
+# APP_TENANT_ID = os.getenv("MICROSOFT_APP_TENANT_ID")
+# APP_TYPE = os.getenv("MICROSOFT_APP_TYPE", "SingleTenant")  # or MultiTenant
 
-CONFIG = {
-    "MicrosoftAppId": APP_ID,
-    "MicrosoftAppPassword": APP_PASSWORD,
-    "MicrosoftAppTenantId": APP_TENANT_ID,
-    "MicrosoftAppType": APP_TYPE,
-}
+class DefaultConfig:
+    """ Bot Configuration """
+
+    PORT = 3978
+    APP_ID = os.environ.get("MICROSOFT_APP_ID", "")
+    APP_PASSWORD = os.environ.get("MICROSOFT_APP_PASSWORD", "")
+    APP_TYPE = os.environ.get("MICROSOFT_APP_TYPE", "MultiTenant")
+    APP_TENANTID = os.environ.get("MICROSOFT_APP_TENANT_ID", "")
+    # CONNECTION_NAME = os.environ.get("ConnectionName", "")
+
+CONFIG = DefaultConfig()
 
 adapter = CloudAdapter(ConfigurationBotFrameworkAuthentication(CONFIG))
 
