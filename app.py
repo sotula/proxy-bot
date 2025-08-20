@@ -5,6 +5,8 @@ from flask import Flask, request, Response
 from dotenv import load_dotenv
 from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings, TurnContext
 from botbuilder.schema import Activity
+from botbuilder.core import CloudAdapter, TurnContext
+from botbuilder.core.auth import ConfigurationServiceClientCredentialFactory
 import asyncio
 from collections import defaultdict, deque
 
@@ -16,8 +18,21 @@ APP_ID = os.getenv("MICROSOFT_APP_ID")
 APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD")
 LAMBDA_URL = os.getenv("LAMBDA_URL")
 
-adapter_settings = BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD)
-adapter = BotFrameworkAdapter(adapter_settings)
+# For single-tenant apps you MUST also set these:
+APP_TENANT_ID = os.getenv("MICROSOFT_APP_TENANT_ID")  # e.g. "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+APP_TYPE = os.getenv("MICROSOFT_APP_TYPE", "SingleTenant")  # "SingleTenant" or "MultiTenant"
+
+creds_factory = ConfigurationServiceClientCredentialFactory(
+    APP_ID,
+    APP_PASSWORD,
+    APP_TENANT_ID,   # required when SingleTenant
+    APP_TYPE,
+)
+
+adapter = CloudAdapter(creds_factory)
+
+# adapter_settings = BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD)
+# adapter = BotFrameworkAdapter(adapter_settings)
 
 # Holds up to 6 recent (user, bot) message pairs per conversation
 message_history = defaultdict(lambda: deque(maxlen=5))
