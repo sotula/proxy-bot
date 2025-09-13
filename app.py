@@ -51,15 +51,16 @@ class LambdaBot:
         conversation_id = turn_context.activity.conversation.id
 
         # Get previous history
-        history = message_history[conversation_id]
+        # history = message_history[conversation_id]
 
         # Build history list of dicts for sending
-        history_payload = [{"user": u, "bot": b} for u, b in history]
+        # history_payload = [{"user": u, "bot": b} for u, b in history]
 
         # Compose request payload
         payload = {
             "text": user_input,
-            "history": history_payload
+            'conversation_id': conversation_id
+            # "history": history_payload
         }
 
         try:
@@ -67,10 +68,10 @@ class LambdaBot:
             reply_text = response.text
             reply_text = json.loads(reply_text)['text']
         except Exception as e:
-            reply_text = f"Lambda error: {str(e)}"
+            reply_text = f"Lambda error: {str(e)} \nInput Data {response.text}"
 
         # Save new message to history
-        history.append((user_input, reply_text))
+        # history.append((user_input, reply_text))
 
         await turn_context.send_activity(reply_text)
 
