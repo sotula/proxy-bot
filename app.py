@@ -29,7 +29,7 @@ log = logging.getLogger("teams_lambda_bot")
 load_dotenv()
 
 class BotConfig:
-    """Configuration class with validation and defaults."""
+    """Configuration class matching Bot Framework SDK expectations."""
     
     def __init__(self):
         # Lambda configuration
@@ -37,12 +37,21 @@ class BotConfig:
         self.LAMBDA_TIMEOUT = float(os.getenv("LAMBDA_TIMEOUT", "120"))
         self.TYPING_INTERVAL = float(os.getenv("TYPING_INTERVAL", "3"))
         
-        # Teams Bot configuration
+        # Bot Framework SDK expects these exact property names
         self.PORT = int(os.getenv("PORT", "3978"))
         self.APP_ID = os.getenv("MICROSOFT_APP_ID", "")
         self.APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD", "")
-        self.APP_TYPE = os.getenv("MICROSOFT_APP_TYPE", "MultiTenant")
-        self.APP_TENANT_ID = os.getenv("MICROSOFT_APP_TENANT_ID", "")
+        self.APP_TYPE = os.getenv("MICROSOFT_APP_TYPE", "SingleTenant")
+        
+        # The SDK specifically looks for APP_TENANTID (no underscore)
+        tenant_id = os.getenv("MICROSOFT_APP_TENANT_ID", "")
+        self.APP_TENANTID = tenant_id
+        
+        # Also provide newer naming convention for future compatibility  
+        self.MicrosoftAppId = self.APP_ID
+        self.MicrosoftAppPassword = self.APP_PASSWORD
+        self.MicrosoftAppType = self.APP_TYPE
+        self.MicrosoftAppTenantId = tenant_id
         
         # Optional configurations
         self.MAX_MESSAGE_HISTORY = int(os.getenv("MAX_MESSAGE_HISTORY", "10"))
