@@ -199,10 +199,15 @@ class ProactiveMessenger:
             async def _typing_logic(turn_context: TurnContext):
                 await turn_context.send_activity(Activity(type=ActivityTypes.typing))
             
-            await adapter.continue_conversation(CONFIG.APP_ID, ref_obj, _typing_logic)
+            # Use string version of APP_ID to avoid any object reference issues
+            app_id = str(CONFIG.APP_ID) if CONFIG.APP_ID else ""
+            log.debug(f"Using app_id: '{app_id}', ref channel_id: '{ref_obj.channel_id}'")
+            
+            await adapter.continue_conversation(app_id, ref_obj, _typing_logic)
             return True
         except Exception as e:
-            log.warning(f"Failed to send typing indicator: {e}")
+            log.error(f"Failed to send typing indicator: {e}")
+            log.exception("Full typing indicator error trace:")
             return False
     
     @staticmethod
@@ -214,10 +219,15 @@ class ProactiveMessenger:
             async def _message_logic(turn_context: TurnContext):
                 await turn_context.send_activity(text)
             
-            await adapter.continue_conversation(CONFIG.APP_ID, ref_obj, _message_logic)
+            # Use string version of APP_ID to avoid any object reference issues
+            app_id = str(CONFIG.APP_ID) if CONFIG.APP_ID else ""
+            log.debug(f"Using app_id: '{app_id}', ref channel_id: '{ref_obj.channel_id}'")
+            
+            await adapter.continue_conversation(app_id, ref_obj, _message_logic)
             return True
         except Exception as e:
             log.error(f"Failed to send proactive message: {e}")
+            log.exception("Full proactive message error trace:")
             return False
 
 # -------------------- Background Worker --------------------
