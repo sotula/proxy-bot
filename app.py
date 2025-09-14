@@ -20,136 +20,150 @@ import aiohttp
 
 # -------------------- Logging --------------------
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for troubleshooting
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,  # keep DEBUG while stabilizing; switch to INFO in prod
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 log = logging.getLogger("teams_lambda_bot")
 
 # -------------------- Configuration --------------------
 load_dotenv()
 
+
 class BotConfig:
     """Configuration class matching Bot Framework SDK expectations."""
-    
+
     def __init__(self):
         # Lambda configuration
         self.LAMBDA_URL = self._get_required_env("LAMBDA_URL")
         self.LAMBDA_TIMEOUT = float(os.getenv("LAMBDA_TIMEOUT", "120"))
         self.TYPING_INTERVAL = float(os.getenv("TYPING_INTERVAL", "3"))
-        
+
         # Bot Framework SDK expects these exact property names
         self.PORT = int(os.getenv("PORT", "3978"))
         self.APP_ID = os.getenv("MICROSOFT_APP_ID", "")
         self.APP_PASSWORD = os.getenv("MICROSOFT_APP_PASSWORD", "")
         self.APP_TYPE = os.getenv("MICROSOFT_APP_TYPE", "SingleTenant")
-        
+
         # The SDK specifically looks for APP_TENANTID (no underscore)
         tenant_id = os.getenv("MICROSOFT_APP_TENANT_ID", "")
         self.APP_TENANTID = tenant_id
-        
-        # Also provide newer naming convention for future compatibility  
+
+        # Also provide newer naming convention for future compatibility
         self.MicrosoftAppId = self.APP_ID
         self.MicrosoftAppPassword = self.APP_PASSWORD
         self.MicrosoftAppType = self.APP_TYPE
         self.MicrosoftAppTenantId = tenant_id
-        
+
         # Optional configurations
         self.MAX_MESSAGE_HISTORY = int(os.getenv("MAX_MESSAGE_HISTORY", "10"))
         self.MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
         self.RETRY_DELAY = float(os.getenv("RETRY_DELAY", "1.0"))
-        
+
         self._validate_config()
-    
+
     def _get_required_env(self, key: str) -> str:
-        """Get required environment variable or raise error."""
         value = os.getenv(key)
         if not value:
             raise ValueError(f"Required environment variable {key} is not set")
         return value
-    
+
     def _validate_config(self):
-        """Validate configuration values."""
         if self.LAMBDA_TIMEOUT <= 0:
             raise ValueError("LAMBDA_TIMEOUT must be positive")
         if self.TYPING_INTERVAL <= 0:
             raise ValueError("TYPING_INTERVAL must be positive")
         if not self.APP_ID:
-            log.warning("MICROSOFT_APP_ID is empty. Proactive messages may fail in production.")
-        
-        # For SingleTenant apps, tenant ID is required
+            log.warning(
+                "MICROSOFT_APP_ID is empty. Proactive messages may fail in production."
+            )
         if self.APP_TYPE == "SingleTenant" and not self.APP_TENANTID:
-            raise ValueError("MICROSOFT_APP_TENANT_ID is required for SingleTenant applications")
+            raise ValueError(
+                "MICROSOFT_APP_TENANT_ID is required for SingleTenant applications"
+            )
+
 
 CONFIG = BotConfig()
 
 # -------------------- App & Adapter --------------------
 app = Flask(__name__)
-adapter = CloudAdapter(ConfigurationBotFrameworkAuthentication(CONFIG))
+
+# Build explicit auth so the SDK doesn't try to reflect attributes from CONFIG
+auth = ConfigurationBotFrameworkAuthentication(
+    MicrosoftAppId=CONFIG.APP_ID,
+    MicrosoftAppPassword=CONFIG.APP_PASSWORD,
+    MicrosoftAppType=CONFIG.APP_TYPE,
+    MicrosoftAppTenantId=CONFIG.APP_TENANTID,
+)
+adapter = CloudAdapter(auth)
 
 # Thread-safe in-memory storage
 conv_refs: Dict[str, ConversationReference] = {}
 message_history = defaultdict(lambda: deque(maxlen=CONFIG.MAX_MESSAGE_HISTORY))
 _storage_lock = threading.RLock()
 
+
 def get_conversation_key(activity: Activity) -> str:
-    """Generate unique conversation key."""
+    """Generate unique conversation key (conversation + user)."""
     return f"{activity.conversation.id}_{activity.from_property.id if activity.from_property else 'unknown'}"
+
 
 # -------------------- Lambda Integration --------------------
 class LambdaClient:
     """Handles Lambda communication with retry logic and error handling."""
-    
+
     def __init__(self, url: str, timeout: float, max_retries: int = 3):
         self.url = url
         self.timeout = timeout
         self.max_retries = max_retries
-    
+
     async def call_async(self, payload: Dict[str, Any]) -> str:
         """Call Lambda with retry logic and proper error handling."""
         timeout = aiohttp.ClientTimeout(total=self.timeout)
-        
+
         for attempt in range(self.max_retries):
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    log.info(f"Calling Lambda (attempt {attempt + 1}/{self.max_retries})")
+                    log.info(
+                        f"Calling Lambda (attempt {attempt + 1}/{self.max_retries})"
+                    )
                     async with session.post(self.url, json=payload) as response:
                         return await self._process_response(response)
-            
+
             except asyncio.TimeoutError:
                 log.warning(f"Lambda timeout on attempt {attempt + 1}")
                 if attempt == self.max_retries - 1:
                     return "Вибачте, обробка запиту зайняла занадто багато часу. Спробуйте ще раз."
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
-            
+
             except aiohttp.ClientError as e:
                 log.error(f"Lambda client error on attempt {attempt + 1}: {e}")
                 if attempt == self.max_retries - 1:
                     return f"Помилка з'єднання з сервісом: {str(e)}"
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
-            
+
             except Exception as e:
                 log.exception(f"Unexpected error on attempt {attempt + 1}")
                 if attempt == self.max_retries - 1:
                     return "Сталася неочікувана помилка обробки запиту."
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
-        
+
         return "Не вдалося обробити запит після кількох спроб."
-    
+
     async def _process_response(self, response: aiohttp.ClientResponse) -> str:
         """Process Lambda response with proper error handling."""
         body = await response.text()
-        
+
         if response.status >= 400:
             log.error(f"Lambda returned error {response.status}: {body[:400]}")
             return f"Сервіс повернув помилку {response.status}. Спробуйте пізніше."
-        
+
+        # Try parse JSON; if not JSON, return as text
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
-            # If it's not JSON, return as plain text
             return body or "Отримано порожню відповідь"
-        
-        # Handle API Gateway/ALB proxy response format
+
+        # Handle common proxy formats
         if isinstance(data, dict):
             if "statusCode" in data and "body" in data:
                 try:
@@ -159,99 +173,122 @@ class LambdaClient:
                     return str(data["body"])
                 except json.JSONDecodeError:
                     return str(data["body"])
-            
-            # Direct response format
+
             if "text" in data:
                 return data["text"]
-            
-            # Error response format
+
             if "error" in data:
                 log.error(f"Lambda returned error: {data['error']}")
                 return "Сталася помилка під час обробки запиту."
-        
+
         # Fallback: return JSON as string
         return json.dumps(data, ensure_ascii=False, indent=2)
 
-lambda_client = LambdaClient(CONFIG.LAMBDA_URL, CONFIG.LAMBDA_TIMEOUT, CONFIG.MAX_RETRY_ATTEMPTS)
+
+lambda_client = LambdaClient(
+    CONFIG.LAMBDA_URL, CONFIG.LAMBDA_TIMEOUT, CONFIG.MAX_RETRY_ATTEMPTS
+)
 
 # -------------------- Proactive Messaging --------------------
 class ProactiveMessenger:
     """Handles proactive messaging with proper error handling."""
-    
+
     @staticmethod
     def _ensure_conversation_reference(obj_or_dict) -> ConversationReference:
-        """Convert dict to ConversationReference object."""
-        log.debug(f"_ensure_conversation_reference called with type: {type(obj_or_dict)}")
-        
+        """Validate ConversationReference object."""
+        log.debug(
+            f"_ensure_conversation_reference called with type: {type(obj_or_dict)}"
+        )
         if isinstance(obj_or_dict, ConversationReference):
-            log.debug(f"Valid ConversationReference object: channel_id={obj_or_dict.channel_id}")
+            log.debug(
+                f"Valid ConversationReference object: channel_id={obj_or_dict.channel_id}"
+            )
             return obj_or_dict
-        
-        log.error(f"Expected ConversationReference object, got {type(obj_or_dict)}: {str(obj_or_dict)[:200]}")
-        raise TypeError(f"Expected ConversationReference object, got {type(obj_or_dict)}")
-    
+        log.error(
+            f"Expected ConversationReference object, got {type(obj_or_dict)}: {str(obj_or_dict)[:200]}"
+        )
+        raise TypeError(
+            f"Expected ConversationReference object, got {type(obj_or_dict)}"
+        )
+
+    @staticmethod
+    async def _continue(ref_obj: ConversationReference, logic):
+        """
+        Call CloudAdapter.continue_conversation with a signature that works across SDK versions.
+        Newer SDK: continue_conversation(reference, logic, bot_app_id=None, ...)
+        Older SDK: continue_conversation(bot_app_id, reference, logic)
+        """
+        try:
+            # Preferred (newer) signature
+            await adapter.continue_conversation(ref_obj, logic, CONFIG.APP_ID)
+        except TypeError:
+            # Fallback to older signature
+            await adapter.continue_conversation(CONFIG.APP_ID, ref_obj, logic)
+
     @staticmethod
     async def send_typing(reference_obj: ConversationReference) -> bool:
         """Send typing indicator proactively."""
         try:
             ref_obj = ProactiveMessenger._ensure_conversation_reference(reference_obj)
-            
+
             async def _typing_logic(turn_context: TurnContext):
                 await turn_context.send_activity(Activity(type=ActivityTypes.typing))
-            
-            # Use string version of APP_ID to avoid any object reference issues
-            app_id = str(CONFIG.APP_ID) if CONFIG.APP_ID else ""
-            log.debug(f"Using app_id: '{app_id}', ref channel_id: '{ref_obj.channel_id}'")
-            
-            await adapter.continue_conversation(app_id, ref_obj, _typing_logic)
+
+            log.debug(
+                f"Using app_id: '{CONFIG.APP_ID}', ref channel_id: '{ref_obj.channel_id}'"
+            )
+            await ProactiveMessenger._continue(ref_obj, _typing_logic)
             return True
         except Exception as e:
             log.error(f"Failed to send typing indicator: {e}")
             log.exception("Full typing indicator error trace:")
             return False
-    
+
     @staticmethod
     async def send_message(reference_obj: ConversationReference, text: str) -> bool:
         """Send message proactively."""
         try:
             ref_obj = ProactiveMessenger._ensure_conversation_reference(reference_obj)
-            
+
             async def _message_logic(turn_context: TurnContext):
                 await turn_context.send_activity(text)
-            
-            # Use string version of APP_ID to avoid any object reference issues
-            app_id = str(CONFIG.APP_ID) if CONFIG.APP_ID else ""
-            log.debug(f"Using app_id: '{app_id}', ref channel_id: '{ref_obj.channel_id}'")
-            
-            await adapter.continue_conversation(app_id, ref_obj, _message_logic)
+
+            log.debug(
+                f"Using app_id: '{CONFIG.APP_ID}', ref channel_id: '{ref_obj.channel_id}'"
+            )
+            await ProactiveMessenger._continue(ref_obj, _message_logic)
             return True
         except Exception as e:
             log.error(f"Failed to send proactive message: {e}")
             log.exception("Full proactive message error trace:")
             return False
 
+
 # -------------------- Background Worker --------------------
 class BackgroundWorker:
     """Manages background processing with typing indicators."""
-    
+
     def __init__(self, messenger: ProactiveMessenger, lambda_client: LambdaClient):
         self.messenger = messenger
         self.lambda_client = lambda_client
-    
-    def start_processing(self, reference_obj: ConversationReference, payload: Dict[str, Any]):
+
+    def start_processing(
+        self, reference_obj: ConversationReference, payload: Dict[str, Any]
+    ):
         """Start background processing in a separate thread."""
+
         def _thread_main():
             """Main thread function with proper async event loop handling."""
             try:
-                # Create new event loop for this thread
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                
                 try:
-                    loop.run_until_complete(self._process_request(reference_obj, payload))
+                    loop.run_until_complete(
+                        self._process_request(reference_obj, payload)
+                    )
                 finally:
                     loop.close()
-            except Exception as e:
+            except Exception:
                 log.exception("Background worker thread failed")
                 # Attempt emergency message send
                 try:
@@ -259,38 +296,43 @@ class BackgroundWorker:
                     asyncio.set_event_loop(emergency_loop)
                     emergency_loop.run_until_complete(
                         self.messenger.send_message(
-                            reference_obj, 
-                            "Сталася критична помилка обробки запиту."
+                            reference_obj, "Сталася критична помилка обробки запиту."
                         )
                     )
                     emergency_loop.close()
-                except:
+                except Exception:
                     log.error("Failed to send emergency message")
-        
+
         thread = threading.Thread(target=_thread_main, daemon=True)
         thread.start()
         log.info("Background worker started")
-    
-    async def _process_request(self, reference_obj: ConversationReference, payload: Dict[str, Any]):
+
+    async def _process_request(
+        self, reference_obj: ConversationReference, payload: Dict[str, Any]
+    ):
         """Process the request with typing indicators."""
-        stop_typing = False
+        stop_event = asyncio.Event()
         typing_task = None
-        
+
         try:
             # Start typing indicator loop
-            typing_task = asyncio.create_task(self._typing_loop(reference_obj, lambda: stop_typing))
-            
+            typing_task = asyncio.create_task(
+                self._typing_loop(reference_obj, stop_event)
+            )
+
             # Process the request
-            log.info(f"Processing Lambda request for conversation: {payload.get('conversation_id', 'unknown')}")
+            log.info(
+                f"Processing Lambda request for conversation: {payload.get('conversation_id', 'unknown')}"
+            )
             answer = await self.lambda_client.call_async(payload)
-            
+
             # Stop typing
-            stop_typing = True
+            stop_event.set()
             if typing_task and not typing_task.done():
                 typing_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await typing_task
-            
+
             # Send final answer
             if answer:
                 success = await self.messenger.send_message(reference_obj, answer)
@@ -300,31 +342,30 @@ class BackgroundWorker:
                     log.error("Failed to send response to Teams")
             else:
                 await self.messenger.send_message(
-                    reference_obj, 
-                    "Не вдалося отримати відповідь від сервісу."
+                    reference_obj, "Не вдалося отримати відповідь від сервісу."
                 )
-        
+
         except Exception as e:
             log.exception("Error in background processing")
-            stop_typing = True
+            stop_event.set()
             if typing_task and not typing_task.done():
                 typing_task.cancel()
-            
+
             # Send error message
             await self.messenger.send_message(
-                reference_obj,
-                f"Сталася помилка обробки: {str(e)}"
+                reference_obj, f"Сталася помилка обробки: {str(e)}"
             )
-    
-    async def _typing_loop(self, reference_obj: ConversationReference, stop_check):
+
+    async def _typing_loop(
+        self, reference_obj: ConversationReference, stop_event: asyncio.Event
+    ):
         """Send typing indicators periodically."""
-        # Send initial typing indicator
         await self.messenger.send_typing(reference_obj)
-        
-        while not stop_check():
+
+        while not stop_event.is_set():
             try:
                 await asyncio.sleep(CONFIG.TYPING_INTERVAL)
-                if stop_check():
+                if stop_event.is_set():
                     break
                 await self.messenger.send_typing(reference_obj)
             except asyncio.CancelledError:
@@ -332,79 +373,92 @@ class BackgroundWorker:
             except Exception as e:
                 log.warning(f"Error in typing loop: {e}")
 
+
 # -------------------- Bot Implementation --------------------
 class TeamsLambdaBot:
     """Main bot class handling Teams messages."""
-    
+
     def __init__(self):
         self.messenger = ProactiveMessenger()
         self.worker = BackgroundWorker(self.messenger, lambda_client)
-    
+
     async def on_turn(self, turn_context: TurnContext):
         """Handle incoming message from Teams."""
         try:
-            # Only process message activities
             if turn_context.activity.type != ActivityTypes.message:
                 log.info(f"Ignoring non-message activity: {turn_context.activity.type}")
                 return
-            
+
             user_input = (turn_context.activity.text or "").strip()
             if not user_input:
-                await turn_context.send_activity("Будь ласка, надішліть текстове повідомлення.")
+                await turn_context.send_activity(
+                    "Будь ласка, надішліть текстове повідомлення."
+                )
                 return
-            
+
             conversation_key = get_conversation_key(turn_context.activity)
-            
+
             # Store conversation reference for proactive messaging
             with _storage_lock:
-                conversation_ref = TurnContext.get_conversation_reference(turn_context.activity)
-                # Store the actual ConversationReference object instead of serializing
+                conversation_ref = TurnContext.get_conversation_reference(
+                    turn_context.activity
+                )
                 conv_refs[conversation_key] = conversation_ref
                 log.debug(f"Stored conversation reference: {type(conversation_ref)}")
-                
+
                 # Store message in history
-                message_history[conversation_key].append({
-                    "timestamp": turn_context.activity.timestamp,
-                    "text": user_input,
-                    "user": turn_context.activity.from_property.name if turn_context.activity.from_property else "Unknown"
-                })
-            
+                message_history[conversation_key].append(
+                    {
+                        "timestamp": turn_context.activity.timestamp,
+                        "text": user_input,
+                        "user": turn_context.activity.from_property.name
+                        if turn_context.activity.from_property
+                        else "Unknown",
+                    }
+                )
+
             # Send immediate acknowledgment
             await turn_context.send_activity("Обробляю ваш запит...")
-            
+
             # Send initial typing indicator (within turn context)
             await turn_context.send_activity(Activity(type=ActivityTypes.typing))
-            
+
             # Prepare payload for Lambda
             payload = {
                 "text": user_input,
                 "conversation_id": conversation_key,
                 "user_info": {
-                    "name": turn_context.activity.from_property.name if turn_context.activity.from_property else "Unknown",
-                    "id": turn_context.activity.from_property.id if turn_context.activity.from_property else "unknown"
+                    "name": turn_context.activity.from_property.name
+                    if turn_context.activity.from_property
+                    else "Unknown",
+                    "id": turn_context.activity.from_property.id
+                    if turn_context.activity.from_property
+                    else "unknown",
                 },
                 "metadata": {
                     "timestamp": str(turn_context.activity.timestamp),
-                    "channel": "teams"
-                }
+                    "channel": "teams",
+                },
             }
-            
+
             # Start background processing
             self.worker.start_processing(conv_refs[conversation_key], payload)
-            
+
             log.info(f"Started processing for conversation: {conversation_key}")
-            
+
         except Exception as e:
             log.exception("Error in on_turn")
             try:
                 await turn_context.send_activity(
                     f"Сталася помилка обробки повідомлення: {str(e)}"
                 )
-            except:
+            except Exception:
                 log.error("Failed to send error message to user")
+
 
 # -------------------- Flask Endpoints --------------------
 bot = TeamsLambdaBot()
+
 
 @app.route("/api/messages", methods=["POST"])
 def messages():
@@ -414,18 +468,18 @@ def messages():
         if "application/json" not in request.headers.get("Content-Type", ""):
             log.warning("Invalid content type")
             return Response("Invalid content type", status=415)
-        
+
         # Parse activity
         try:
             activity = Activity().deserialize(request.json)
         except Exception as e:
             log.error(f"Failed to deserialize activity: {e}")
             return Response("Invalid activity format", status=400)
-        
+
         # Get auth header
         auth_header = request.headers.get("Authorization", "")
-        
-        # Process activity
+
+        # Process activity (own event loop per request; safe in gunicorn/threaded Flask)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -436,15 +490,17 @@ def messages():
             return Response(status=200)
         finally:
             loop.close()
-    
+
     except Exception as e:
         log.exception("Error in messages endpoint")
         return Response(f"Internal server error: {str(e)}", status=500)
+
 
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "teams-lambda-bot"}
+
 
 @app.route("/stats", methods=["GET"])
 def stats():
@@ -456,19 +512,22 @@ def stats():
             "config": {
                 "lambda_timeout": CONFIG.LAMBDA_TIMEOUT,
                 "typing_interval": CONFIG.TYPING_INTERVAL,
-                "max_retries": CONFIG.MAX_RETRY_ATTEMPTS
-            }
+                "max_retries": CONFIG.MAX_RETRY_ATTEMPTS,
+            },
         }
+
 
 # -------------------- Error Handlers --------------------
 @app.errorhandler(404)
 def not_found(error):
     return {"error": "Endpoint not found"}, 404
 
+
 @app.errorhandler(500)
 def internal_error(error):
     log.exception("Internal server error")
     return {"error": "Internal server error"}, 500
+
 
 # -------------------- Application Entry Point --------------------
 if __name__ == "__main__":
@@ -476,13 +535,13 @@ if __name__ == "__main__":
         log.info(f"Starting Teams Lambda Bot on port {CONFIG.PORT}")
         log.info(f"Lambda URL: {CONFIG.LAMBDA_URL}")
         log.info(f"App ID configured: {'Yes' if CONFIG.APP_ID else 'No'}")
-        
+
         app.run(
-            host="0.0.0.0", 
+            host="0.0.0.0",
             port=CONFIG.PORT,
             debug=False,  # Set to False in production
-            threaded=True
+            threaded=True,
         )
-    except Exception as e:
+    except Exception:
         log.exception("Failed to start application")
         raise
