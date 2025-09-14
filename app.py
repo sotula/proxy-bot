@@ -453,7 +453,7 @@ if __name__ == "__main__":
     try:
         log.info(f"Starting Teams Lambda Bot on port {CONFIG.PORT}")
         log.info(f"Lambda URL: {CONFIG.LAMBDA_URL}")
-        log.info(f"App ID configured: {'Yes' if CONFIG.MicrosoftAppId else 'No'}")
+        log.info(f"App ID configured: {'Yes' if CONFIG.APP_ID else 'No'}")
         
         app.run(
             host="0.0.0.0", 
