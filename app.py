@@ -20,7 +20,7 @@ import aiohttp
 
 # -------------------- Logging --------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for troubleshooting
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 log = logging.getLogger("teams_lambda_bot")
@@ -87,7 +87,7 @@ app = Flask(__name__)
 adapter = CloudAdapter(ConfigurationBotFrameworkAuthentication(CONFIG))
 
 # Thread-safe in-memory storage
-conv_refs: Dict[str, Dict[str, Any]] = {}
+conv_refs: Dict[str, ConversationReference] = {}
 message_history = defaultdict(lambda: deque(maxlen=CONFIG.MAX_MESSAGE_HISTORY))
 _storage_lock = threading.RLock()
 
@@ -184,54 +184,14 @@ class ProactiveMessenger:
         if isinstance(obj_or_dict, ConversationReference):
             return obj_or_dict
         
-        if isinstance(obj_or_dict, dict):
-            # Create a new ConversationReference from our dict format
-            from botbuilder.schema import ChannelAccount, ConversationAccount
-            
-            conv_ref = ConversationReference()
-            
-            # Set basic properties
-            conv_ref.channel_id = obj_or_dict.get('channel_id')
-            conv_ref.service_url = obj_or_dict.get('service_url')
-            conv_ref.activity_id = obj_or_dict.get('activity_id')
-            conv_ref.locale = obj_or_dict.get('locale')
-            
-            # Set user
-            if obj_or_dict.get('user'):
-                user_data = obj_or_dict['user']
-                conv_ref.user = ChannelAccount(
-                    id=user_data.get('id'),
-                    name=user_data.get('name')
-                )
-            
-            # Set bot
-            if obj_or_dict.get('bot'):
-                bot_data = obj_or_dict['bot']
-                conv_ref.bot = ChannelAccount(
-                    id=bot_data.get('id'),
-                    name=bot_data.get('name')
-                )
-            
-            # Set conversation
-            if obj_or_dict.get('conversation'):
-                conv_data = obj_or_dict['conversation']
-                conv_ref.conversation = ConversationAccount(
-                    id=conv_data.get('id'),
-                    name=conv_data.get('name'),
-                    conversation_type=conv_data.get('conversation_type'),
-                    tenant_id=conv_data.get('tenant_id'),
-                    is_group=conv_data.get('is_group')
-                )
-            
-            return conv_ref
-        
-        raise TypeError(f"Expected ConversationReference or dict, got {type(obj_or_dict)}")
+        log.error(f"Expected ConversationReference object, got {type(obj_or_dict)}: {obj_or_dict}")
+        raise TypeError(f"Expected ConversationReference object, got {type(obj_or_dict)}")
     
     @staticmethod
-    async def send_typing(reference_dict: Dict[str, Any]) -> bool:
+    async def send_typing(reference_obj: ConversationReference) -> bool:
         """Send typing indicator proactively."""
         try:
-            ref_obj = ProactiveMessenger._ensure_conversation_reference(reference_dict)
+            ref_obj = ProactiveMessenger._ensure_conversation_reference(reference_obj)
             
             async def _typing_logic(turn_context: TurnContext):
                 await turn_context.send_activity(Activity(type=ActivityTypes.typing))
@@ -243,10 +203,10 @@ class ProactiveMessenger:
             return False
     
     @staticmethod
-    async def send_message(reference_dict: Dict[str, Any], text: str) -> bool:
+    async def send_message(reference_obj: ConversationReference, text: str) -> bool:
         """Send message proactively."""
         try:
-            ref_obj = ProactiveMessenger._ensure_conversation_reference(reference_dict)
+            ref_obj = ProactiveMessenger._ensure_conversation_reference(reference_obj)
             
             async def _message_logic(turn_context: TurnContext):
                 await turn_context.send_activity(text)
@@ -265,7 +225,7 @@ class BackgroundWorker:
         self.messenger = messenger
         self.lambda_client = lambda_client
     
-    def start_processing(self, reference_dict: Dict[str, Any], payload: Dict[str, Any]):
+    def start_processing(self, reference_obj: ConversationReference, payload: Dict[str, Any]):
         """Start background processing in a separate thread."""
         def _thread_main():
             """Main thread function with proper async event loop handling."""
@@ -275,7 +235,7 @@ class BackgroundWorker:
                 asyncio.set_event_loop(loop)
                 
                 try:
-                    loop.run_until_complete(self._process_request(reference_dict, payload))
+                    loop.run_until_complete(self._process_request(reference_obj, payload))
                 finally:
                     loop.close()
             except Exception as e:
@@ -286,7 +246,7 @@ class BackgroundWorker:
                     asyncio.set_event_loop(emergency_loop)
                     emergency_loop.run_until_complete(
                         self.messenger.send_message(
-                            reference_dict, 
+                            reference_obj, 
                             "Сталася критична помилка обробки запиту."
                         )
                     )
@@ -298,14 +258,14 @@ class BackgroundWorker:
         thread.start()
         log.info("Background worker started")
     
-    async def _process_request(self, reference_dict: Dict[str, Any], payload: Dict[str, Any]):
+    async def _process_request(self, reference_obj: ConversationReference, payload: Dict[str, Any]):
         """Process the request with typing indicators."""
         stop_typing = False
         typing_task = None
         
         try:
             # Start typing indicator loop
-            typing_task = asyncio.create_task(self._typing_loop(reference_dict, stop_typing))
+            typing_task = asyncio.create_task(self._typing_loop(reference_obj, lambda: stop_typing))
             
             # Process the request
             log.info(f"Processing Lambda request for conversation: {payload.get('conversation_id', 'unknown')}")
@@ -320,14 +280,14 @@ class BackgroundWorker:
             
             # Send final answer
             if answer:
-                success = await self.messenger.send_message(reference_dict, answer)
+                success = await self.messenger.send_message(reference_obj, answer)
                 if success:
                     log.info("Successfully sent response to Teams")
                 else:
                     log.error("Failed to send response to Teams")
             else:
                 await self.messenger.send_message(
-                    reference_dict, 
+                    reference_obj, 
                     "Не вдалося отримати відповідь від сервісу."
                 )
         
@@ -339,21 +299,21 @@ class BackgroundWorker:
             
             # Send error message
             await self.messenger.send_message(
-                reference_dict,
+                reference_obj,
                 f"Сталася помилка обробки: {str(e)}"
             )
     
-    async def _typing_loop(self, reference_dict: Dict[str, Any], stop_flag):
+    async def _typing_loop(self, reference_obj: ConversationReference, stop_check):
         """Send typing indicators periodically."""
         # Send initial typing indicator
-        await self.messenger.send_typing(reference_dict)
+        await self.messenger.send_typing(reference_obj)
         
-        while not stop_flag:
+        while not stop_check():
             try:
                 await asyncio.sleep(CONFIG.TYPING_INTERVAL)
-                if stop_flag:
+                if stop_check():
                     break
-                await self.messenger.send_typing(reference_dict)
+                await self.messenger.send_typing(reference_obj)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -385,13 +345,9 @@ class TeamsLambdaBot:
             # Store conversation reference for proactive messaging
             with _storage_lock:
                 conversation_ref = TurnContext.get_conversation_reference(turn_context.activity)
-                if hasattr(conversation_ref, 'serialize'):
-                    conv_refs[conversation_key] = conversation_ref.serialize()
-                else:
-                    # Fallback serialization
-                    conv_refs[conversation_key] = json.loads(
-                        json.dumps(conversation_ref.__dict__, default=str)
-                    )
+                # Store the actual ConversationReference object instead of serializing
+                conv_refs[conversation_key] = conversation_ref
+                log.debug(f"Stored conversation reference: {type(conversation_ref)}")
                 
                 # Store message in history
                 message_history[conversation_key].append({
