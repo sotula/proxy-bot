@@ -183,8 +183,48 @@ class ProactiveMessenger:
         """Convert dict to ConversationReference object."""
         if isinstance(obj_or_dict, ConversationReference):
             return obj_or_dict
+        
         if isinstance(obj_or_dict, dict):
-            return ConversationReference().deserialize(obj_or_dict)
+            # Create a new ConversationReference from our dict format
+            from botbuilder.schema import ChannelAccount, ConversationAccount
+            
+            conv_ref = ConversationReference()
+            
+            # Set basic properties
+            conv_ref.channel_id = obj_or_dict.get('channel_id')
+            conv_ref.service_url = obj_or_dict.get('service_url')
+            conv_ref.activity_id = obj_or_dict.get('activity_id')
+            conv_ref.locale = obj_or_dict.get('locale')
+            
+            # Set user
+            if obj_or_dict.get('user'):
+                user_data = obj_or_dict['user']
+                conv_ref.user = ChannelAccount(
+                    id=user_data.get('id'),
+                    name=user_data.get('name')
+                )
+            
+            # Set bot
+            if obj_or_dict.get('bot'):
+                bot_data = obj_or_dict['bot']
+                conv_ref.bot = ChannelAccount(
+                    id=bot_data.get('id'),
+                    name=bot_data.get('name')
+                )
+            
+            # Set conversation
+            if obj_or_dict.get('conversation'):
+                conv_data = obj_or_dict['conversation']
+                conv_ref.conversation = ConversationAccount(
+                    id=conv_data.get('id'),
+                    name=conv_data.get('name'),
+                    conversation_type=conv_data.get('conversation_type'),
+                    tenant_id=conv_data.get('tenant_id'),
+                    is_group=conv_data.get('is_group')
+                )
+            
+            return conv_ref
+        
         raise TypeError(f"Expected ConversationReference or dict, got {type(obj_or_dict)}")
     
     @staticmethod
