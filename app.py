@@ -66,6 +66,10 @@ class BotConfig:
             raise ValueError("TYPING_INTERVAL must be positive")
         if not self.APP_ID:
             log.warning("MICROSOFT_APP_ID is empty. Proactive messages may fail in production.")
+        
+        # For SingleTenant apps, tenant ID is required
+        if self.APP_TYPE == "SingleTenant" and not self.APP_TENANTID:
+            raise ValueError("MICROSOFT_APP_TENANT_ID is required for SingleTenant applications")
 
 CONFIG = BotConfig()
 
