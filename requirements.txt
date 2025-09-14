@@ -1,6 +1,5 @@
-flask
-requests
-python-dotenv
+flask>=2.3.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
 botbuilder-core==4.17.0
 botbuilder-schema==4.17.0
 botbuilder-integration-aiohttp==4.17.0
