@@ -181,10 +181,13 @@ class ProactiveMessenger:
     @staticmethod
     def _ensure_conversation_reference(obj_or_dict) -> ConversationReference:
         """Convert dict to ConversationReference object."""
+        log.debug(f"_ensure_conversation_reference called with type: {type(obj_or_dict)}")
+        
         if isinstance(obj_or_dict, ConversationReference):
+            log.debug(f"Valid ConversationReference object: channel_id={obj_or_dict.channel_id}")
             return obj_or_dict
         
-        log.error(f"Expected ConversationReference object, got {type(obj_or_dict)}: {obj_or_dict}")
+        log.error(f"Expected ConversationReference object, got {type(obj_or_dict)}: {str(obj_or_dict)[:200]}")
         raise TypeError(f"Expected ConversationReference object, got {type(obj_or_dict)}")
     
     @staticmethod
