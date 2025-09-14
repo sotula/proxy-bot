@@ -65,12 +65,13 @@ async def lambda_call_async(payload: dict) -> str:
 async def send_typing_proactive(reference: ConversationReference):
     async def _logic(tc: TurnContext):
         await tc.send_activity(Activity(type=ActivityTypes.typing))
-    await adapter.continue_conversation(reference=reference, logic=_logic)
+    # CloudAdapter signature: continue_conversation(app_id_or_claims_identity, reference, logic, audience=None)
+    await adapter.continue_conversation(CONFIG.APP_ID, reference, _logic)
 
 async def send_message_proactive(reference: ConversationReference, text: str):
     async def _logic(tc: TurnContext):
         await tc.send_activity(text)
-    await adapter.continue_conversation(reference=reference, logic=_logic)
+    await adapter.continue_conversation(CONFIG.APP_ID, reference, _logic)
 
 # -------------------- Background Worker --------------------
 def start_background_worker(reference: ConversationReference, payload: dict):
@@ -153,11 +154,8 @@ def messages():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     task = loop.create_task(
-        adapter.process_activity(
-            auth_header_or_authenticate_request_result=auth_header,
-            activity=activity,
-            logic=bot.on_turn,
-        )
+        # Use positional args to match CloudAdapter signature across 4.17.x
+        adapter.process_activity(auth_header, activity, bot.on_turn)
     )
     loop.run_until_complete(task)
     return Response(status=200)
