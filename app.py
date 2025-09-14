@@ -3,8 +3,8 @@ from collections import defaultdict, deque
 from flask import Flask, request, Response
 from dotenv import load_dotenv
 
-from botbuilder.core import TurnContext, ConversationReference
-from botbuilder.schema import Activity, ActivityTypes
+from botbuilder.core import TurnContext
+from botbuilder.schema import Activity, ActivityTypes, ConversationReference
 from botbuilder.integration.aiohttp import (
     CloudAdapter,
     ConfigurationBotFrameworkAuthentication,
