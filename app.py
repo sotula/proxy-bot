@@ -204,7 +204,11 @@ class ProactiveMessenger:
             app_id = str(CONFIG.APP_ID) if CONFIG.APP_ID else ""
             log.debug(f"Using app_id: '{app_id}', ref channel_id: '{ref_obj.channel_id}'")
             
-            await adapter.continue_conversation(app_id, ref_obj, _typing_logic)
+            await adapter.continue_conversation(
+                bot_app_id=app_id, 
+                reference=ref_obj, 
+                callback=_typing_logic
+                )
             return True
         except Exception as e:
             log.error(f"Failed to send typing indicator: {e}")
