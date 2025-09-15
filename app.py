@@ -119,19 +119,19 @@ class LambdaClient:
         if self.auth_mode != "AWS_IAM":
             return headers
 
-        # # Build a botocore AWSRequest and sign it
-        # session = boto_get_session()
-        # creds = session.get_credentials()
-        # if creds is None:
-        #     raise RuntimeError("No AWS credentials available for SigV4 signing (AWS_IAM).")
+        # Build a botocore AWSRequest and sign it
+        session = boto_get_session()
+        creds = session.get_credentials()
+        if creds is None:
+            raise RuntimeError("No AWS credentials available for SigV4 signing (AWS_IAM).")
 
-        # aws_req = AWSRequest(method="POST", url=self.url, data=body_bytes, headers=headers.copy())
-        # SigV4Auth(creds, "lambda", self.region).add_auth(aws_req)
-        # # Convert botocore headers to a plain dict for aiohttp
-        # signed_headers = dict(aws_req.headers.items())
-        # # Ensure keep-alive is present (optional)
-        # signed_headers.setdefault("Connection", "keep-alive")
-        # return signed_headers
+        aws_req = AWSRequest(method="POST", url=self.url, data=body_bytes, headers=headers.copy())
+        SigV4Auth(creds, "lambda", self.region).add_auth(aws_req)
+        # Convert botocore headers to a plain dict for aiohttp
+        signed_headers = dict(aws_req.headers.items())
+        # Ensure keep-alive is present (optional)
+        signed_headers.setdefault("Connection", "keep-alive")
+        return signed_headers
     
     async def call_async(self, payload: Dict[str, Any]) -> str:
         """Call Lambda Function URL with retry logic and proper error handling."""
