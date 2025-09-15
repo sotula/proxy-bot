@@ -426,7 +426,7 @@ class TeamsLambdaBot:
                 })
             
             # Send immediate acknowledgment
-            await turn_context.send_activity("Обробляю ваш запит...")
+            # await turn_context.send_activity("Обробляю ваш запит...")
             
             # Send initial typing indicator (within turn context)
             await turn_context.send_activity(Activity(type=ActivityTypes.typing))
