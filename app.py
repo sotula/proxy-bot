@@ -185,6 +185,7 @@ class ProactiveMessenger:
         
         if isinstance(obj_or_dict, ConversationReference):
             log.debug(f"Valid ConversationReference object: channel_id={obj_or_dict.channel_id}")
+            log.debug(obj_or_dict)
             return obj_or_dict
         
         log.error(f"Expected ConversationReference object, got {type(obj_or_dict)}: {str(obj_or_dict)[:200]}")
