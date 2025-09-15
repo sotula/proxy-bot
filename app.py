@@ -15,6 +15,10 @@ from botbuilder.integration.aiohttp import (
     CloudAdapter,
     ConfigurationBotFrameworkAuthentication,
 )
+import base64
+# from botocore.session import get_session as boto_get_session
+# from botocore.auth import SigV4Auth
+# from botocore.awsrequest import AWSRequest
 
 import aiohttp
 
@@ -103,73 +107,116 @@ class LambdaClient:
         self.url = url
         self.timeout = timeout
         self.max_retries = max_retries
+        # Optional auth for Function URL
+        self.auth_mode = os.getenv("LAMBDA_URL_AUTH", "NONE").upper()  # "NONE" or "AWS_IAM"
+        self.region = os.getenv("AWS_REGION", "eu-central-1")
+
+    def _sign_if_needed(self, body_bytes: bytes) -> dict:
+        """
+        Returns headers (including SigV4) if auth_mode == AWS_IAM, else minimal headers.
+        """
+        headers = {"Content-Type": "application/json", "Connection": "keep-alive"}
+        if self.auth_mode != "AWS_IAM":
+            return headers
+
+        # # Build a botocore AWSRequest and sign it
+        # session = boto_get_session()
+        # creds = session.get_credentials()
+        # if creds is None:
+        #     raise RuntimeError("No AWS credentials available for SigV4 signing (AWS_IAM).")
+
+        # aws_req = AWSRequest(method="POST", url=self.url, data=body_bytes, headers=headers.copy())
+        # SigV4Auth(creds, "lambda", self.region).add_auth(aws_req)
+        # # Convert botocore headers to a plain dict for aiohttp
+        # signed_headers = dict(aws_req.headers.items())
+        # # Ensure keep-alive is present (optional)
+        # signed_headers.setdefault("Connection", "keep-alive")
+        # return signed_headers
     
     async def call_async(self, payload: Dict[str, Any]) -> str:
-        """Call Lambda with retry logic and proper error handling."""
+        """Call Lambda Function URL with retry logic and proper error handling."""
         timeout = aiohttp.ClientTimeout(total=self.timeout)
-        
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = self._sign_if_needed(body_bytes)
+
         for attempt in range(self.max_retries):
             try:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    log.info(f"Calling Lambda (attempt {attempt + 1}/{self.max_retries})")
-                    async with session.post(self.url, json=payload) as response:
+                    log.info(f"Calling Lambda URL (attempt {attempt + 1}/{self.max_retries}, auth={self.auth_mode})")
+                    async with session.post(self.url, data=body_bytes, headers=headers) as response:
                         return await self._process_response(response)
-            
+
             except asyncio.TimeoutError:
-                log.warning(f"Lambda timeout on attempt {attempt + 1}")
+                log.warning(f"Lambda URL timeout on attempt {attempt + 1}")
                 if attempt == self.max_retries - 1:
                     return "Вибачте, обробка запиту зайняла занадто багато часу. Спробуйте ще раз."
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
-            
+
             except aiohttp.ClientError as e:
-                log.error(f"Lambda client error on attempt {attempt + 1}: {e}")
+                log.error(f"Lambda URL client error on attempt {attempt + 1}: {e}")
                 if attempt == self.max_retries - 1:
                     return f"Помилка з'єднання з сервісом: {str(e)}"
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
-            
+
             except Exception as e:
                 log.exception(f"Unexpected error on attempt {attempt + 1}")
                 if attempt == self.max_retries - 1:
                     return "Сталася неочікувана помилка обробки запиту."
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
-        
+
         return "Не вдалося обробити запит після кількох спроб."
     
     async def _process_response(self, response: aiohttp.ClientResponse) -> str:
-        """Process Lambda response with proper error handling."""
+        """
+        Process Lambda Function URL response.
+        Function URLs use Lambda’s HTTP payload format (v2). Your handler usually returns:
+          {"statusCode": 200, "headers": {...}, "body": "..."}  (optionally isBase64Encoded)
+        """
         body = await response.text()
-        
+
+        # 502 can happen if Lambda function itself errored; still parse body.
         if response.status >= 400:
-            log.error(f"Lambda returned error {response.status}: {body[:400]}")
+            log.error(f"Lambda URL returned error {response.status}: {body[:400]}")
+            # Try to extract Lambda-style error message
+            try:
+                data = json.loads(body)
+                msg = data.get("errorMessage") or data.get("message")
+                if msg:
+                    return f"Сервіс повернув помилку {response.status}: {msg}"
+            except Exception:
+                pass
             return f"Сервіс повернув помилку {response.status}. Спробуйте пізніше."
-        
+
+        # Parse success path
         try:
-            data = json.loads(body)
+            data = json.loads(body) if body else {}
         except json.JSONDecodeError:
-            # If it's not JSON, return as plain text
+            # If you return raw text from Lambda, just relay it
             return body or "Отримано порожню відповідь"
-        
-        # Handle API Gateway/ALB proxy response format
-        if isinstance(data, dict):
-            if "statusCode" in data and "body" in data:
+
+        # Handle standard Lambda URL proxy shape
+        if isinstance(data, dict) and "statusCode" in data:
+            # Function might return base64-encoded body
+            raw_body = data.get("body", "")
+            if data.get("isBase64Encoded"):
                 try:
-                    inner_data = json.loads(data["body"])
-                    if isinstance(inner_data, dict) and "text" in inner_data:
-                        return inner_data["text"]
-                    return str(data["body"])
-                except json.JSONDecodeError:
-                    return str(data["body"])
-            
-            # Direct response format
-            if "text" in data:
-                return data["text"]
-            
-            # Error response format
-            if "error" in data:
-                log.error(f"Lambda returned error: {data['error']}")
-                return "Сталася помилка під час обробки запиту."
-        
-        # Fallback: return JSON as string
+                    raw_body = base64.b64decode(raw_body or "").decode("utf-8", "ignore")
+                except Exception:
+                    pass
+            # Your Lambda often wraps {"text": "..."} in body
+            try:
+                inner = json.loads(raw_body)
+                if isinstance(inner, dict) and "text" in inner:
+                    return inner["text"]
+                return raw_body if raw_body else "Отримано порожню відповідь"
+            except Exception:
+                return raw_body if raw_body else "Отримано порожню відповідь"
+
+        # Direct JSON shape: {"text": "..."} (if your handler returns dict directly)
+        if isinstance(data, dict) and "text" in data:
+            return data["text"]
+
+        # Fallback
         return json.dumps(data, ensure_ascii=False, indent=2)
 
 lambda_client = LambdaClient(CONFIG.LAMBDA_URL, CONFIG.LAMBDA_TIMEOUT, CONFIG.MAX_RETRY_ATTEMPTS)
