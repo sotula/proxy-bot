@@ -9,6 +9,8 @@ from collections import defaultdict, deque
 from typing import Dict, Optional, Any
 from flask import Flask, request, Response
 from dotenv import load_dotenv
+from pathlib import Path
+from botbuilder.schema import InvokeResponse
 
 from botbuilder.schema.teams import FileConsentCard, FileInfoCard, FileUploadInfo
 from botbuilder.schema import Attachment, Activity, ActivityTypes, CardAction, ActionTypes, ChannelAccount
@@ -627,18 +629,18 @@ def _make_file_consent_attachment(filename: str, size_bytes: int) -> Attachment:
         name=filename,
     )
 
-def _make_file_info_attachment(filename: str, url: str) -> Attachment:
-    # After upload, you send a FileInfoCard so user gets a proper file "chiclet"
+def _make_file_info_attachment(filename: str, content_url: str, unique_id: str | None = None) -> Attachment:
+    # MUST include an extension in filename (e.g., ".xlsx")
+    ext = Path(filename).suffix.lstrip(".").lower() or None
     info = FileInfoCard(
-        unique_id=None,  # optional
-        file_type=None,  # optional
-        # name is taken from Attachment.name below
+        file_type=ext,     # e.g., "xlsx" → shows Excel icon
+        unique_id=unique_id  # optional, if Teams returns it
     )
     return Attachment(
         content_type="application/vnd.microsoft.teams.card.file.info",
         content=info,
-        name=filename,
-        content_url=url,  # Teams renders from this URL
+        name=filename,          # must match the uploaded file name
+        content_url=content_url # MUST be uploadInfo.contentUrl
     )
 
 
@@ -661,8 +663,18 @@ class TeamsLambdaBot:
                 filename = context.get("fileName") or "file"
 
                 if action == "accept":
+                    try:
+                        await turn_context.send_activity(
+                            Activity(type=ActivityTypes.invoke_response, value=InvokeResponse(status=200))
+                        )
+                    except Exception:
+                        await turn_context.send_activity(
+                            Activity(type=ActivityTypes.invoke_response, value={"status": 200})
+                        )
+
                     upload_info = val.get("uploadInfo") or {}
                     upload_url = upload_info.get("uploadUrl")
+                    content_url  = upload_info.get("contentUrl")
                     if not upload_url:
                         await turn_context.send_activity("Не отримав uploadUrl від Teams.")
                         return
@@ -689,8 +701,15 @@ class TeamsLambdaBot:
 
                     # Send FileInfo card so user gets the file
                     file_consent_result_url = upload_info.get("contentUrl") or upload_info.get("name")  # Teams returns contentUrl
-                    finfo = _make_file_info_attachment(filename, file_consent_result_url)
-                    await turn_context.send_activity(Activity(type=ActivityTypes.message, attachments=[finfo]))
+                    finfo = _make_file_info_attachment(
+                        filename,
+                        content_url=content_url,
+                        unique_id=upload_info.get("uniqueId")  # optional
+                    )
+                    await turn_context.send_activity(Activity(
+                        type=ActivityTypes.message,
+                        attachments=[finfo]
+                    ))
                     return
 
                 else:
