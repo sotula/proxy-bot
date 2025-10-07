@@ -61,6 +61,22 @@ class BotConfig:
         self.MAX_MESSAGE_HISTORY = int(os.getenv("MAX_MESSAGE_HISTORY", "10"))
         self.MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
         self.RETRY_DELAY = float(os.getenv("RETRY_DELAY", "1.0"))
+
+        # ---- File handling (env overridable) ----
+        self.MAX_FILE_BYTES = int(os.getenv("MAX_FILE_BYTES", str(25 * 1024 * 1024)))  # 25MB per file
+        self.MAX_TOTAL_BYTES = int(os.getenv("MAX_TOTAL_BYTES", str(40 * 1024 * 1024)))  # 40MB per message
+        self.ALLOWED_MIME = set(os.getenv(
+            "ALLOWED_MIME",
+            ",".join([
+                "application/pdf","text/plain","text/csv",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
+                "application/vnd.ms-excel",  # legacy .xls
+                "application/json",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+                "application/zip",
+            ])
+        ).split(","))
+        self.FALLBACK_URLS_IF_TOO_BIG = os.getenv("FALLBACK_URLS_IF_TOO_BIG", "false").lower() == "true"
         
         self._validate_config()
     
@@ -108,7 +124,7 @@ class LambdaClient:
         self.timeout = timeout
         self.max_retries = max_retries
         # Optional auth for Function URL
-        self.auth_mode = os.getenv("LAMBDA_URL_AUTH", "NONE").upper()  # "NONE" or "AWS_IAM"
+        self.auth_mode = os.getenv("LAMBDA_URL_AUTH", "AWS_IAM").upper()  # "NONE" or "AWS_IAM"
         self.region = os.getenv("AWS_REGION", "eu-central-1")
 
     def _sign_if_needed(self, body_bytes: bytes) -> dict:
@@ -388,6 +404,132 @@ class BackgroundWorker:
             except Exception as e:
                 log.warning(f"Error in typing loop: {e}")
 
+
+async def _download_with_limit(session: aiohttp.ClientSession, url: str, max_bytes: int) -> bytes:
+    """
+    Stream download with size guard. Raises ValueError if exceeds max_bytes.
+    """
+    async with session.get(url) as resp:
+        if resp.status != 200:
+            raise ValueError(f"Download failed: HTTP {resp.status}")
+        chunks = []
+        total = 0
+        async for chunk in resp.content.iter_chunked(1024 * 64):
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"File exceeds allowed size limit ({max_bytes} bytes).")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
+def _guess_name(att) -> str:
+    # Try multiple places where Teams puts file name
+    return (
+        getattr(att, "name", None)
+        or (att.content and att.content.get("fileName"))
+        or (att.name if hasattr(att, "name") else None)
+        or "file"
+    )
+
+
+def _guess_content_type(att) -> str:
+    # Prefer explicit contentType; fall back to fileType from Teams payload
+    ct = getattr(att, "content_type", None) or (att.content and att.content.get("fileType"))
+    return ct or "application/octet-stream"
+
+
+async def extract_files_from_activity(activity: Activity, cfg: BotConfig) -> dict:
+    """
+    Returns {"files": [...], "warnings": [...], "urls": [...]}.
+    Each file item: { "filename", "content_type", "size", "b64" }
+    Each url  item: { "filename", "content_type", "download_url", "size": None }
+    """
+    out = {"files": [], "warnings": [], "urls": []}
+    attachments = activity.attachments or []
+    if not attachments:
+        return out
+
+    timeout = aiohttp.ClientTimeout(total=cfg.LAMBDA_TIMEOUT)
+    total_bytes = 0
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for att in attachments:
+            try:
+                ct = _guess_content_type(att)
+                fname = _guess_name(att)
+
+                # Teams native file message → downloadUrl with no auth needed
+                if ct == "application/vnd.microsoft.teams.file.download.info" and att.content:
+                    download_url = att.content.get("downloadUrl")
+                    inferred_type = att.content.get("fileType")
+                    if inferred_type and inferred_type != ct:
+                        ct = inferred_type
+
+                    if cfg.ALLOWED_MIME and ct not in cfg.ALLOWED_MIME and "application/" in ct:
+                        out["warnings"].append(f"{fname}: MIME '{ct}' not in allowed list; sending URL instead.")
+                        out["urls"].append({
+                            "filename": fname, "content_type": ct, "download_url": download_url
+                        })
+                        continue
+
+                    try:
+                        data = await _download_with_limit(session, download_url, cfg.MAX_FILE_BYTES)
+                        total_bytes += len(data)
+                        if total_bytes > cfg.MAX_TOTAL_BYTES:
+                            raise ValueError("Total files exceed allowed combined limit.")
+                        out["files"].append({
+                            "filename": fname,
+                            "content_type": ct,
+                            "size": len(data),
+                            "b64": base64.b64encode(data).decode("ascii")
+                        })
+                    except ValueError as size_err:
+                        if cfg.FALLBACK_URLS_IF_TOO_BIG:
+                            out["warnings"].append(f"{fname}: {size_err}. Passing URL instead.")
+                            out["urls"].append({
+                                "filename": fname, "content_type": ct, "download_url": download_url
+                            })
+                        else:
+                            out["warnings"].append(f"{fname}: {size_err}. Skipped.")
+
+                # Generic attachment with content_url (may require auth on non-Teams channels)
+                elif getattr(att, "content_url", None):
+                    download_url = att.content_url
+
+                    # We try no-auth first; Teams 'v3/attachments' usually needs auth, but the
+                    # 'file.download.info' path above is the common Teams route and needs no auth.
+                    # If this fails in your tenant, prefer the 'download.info' path.
+                    try:
+                        data = await _download_with_limit(session, download_url, cfg.MAX_FILE_BYTES)
+                        total_bytes += len(data)
+                        if total_bytes > cfg.MAX_TOTAL_BYTES:
+                            raise ValueError("Total files exceed allowed combined limit.")
+                        out["files"].append({
+                            "filename": fname,
+                            "content_type": ct,
+                            "size": len(data),
+                            "b64": base64.b64encode(data).decode("ascii")
+                        })
+                    except Exception as e:
+                        if cfg.FALLBACK_URLS_IF_TOO_BIG:
+                            out["warnings"].append(f"{fname}: {e}. Passing URL instead.")
+                            out["urls"].append({
+                                "filename": fname, "content_type": ct, "download_url": download_url
+                            })
+                        else:
+                            out["warnings"].append(f"{fname}: {e}. Skipped.")
+
+                else:
+                    out["warnings"].append(f"{_guess_name(att)}: Unsupported attachment shape; skipped.")
+
+            except Exception as e:
+                out["warnings"].append(f"{_guess_name(att)}: Unexpected error {e}. Skipped.")
+
+    return out
+
+
 # -------------------- Bot Implementation --------------------
 class TeamsLambdaBot:
     """Main bot class handling Teams messages."""
@@ -405,8 +547,9 @@ class TeamsLambdaBot:
                 return
             
             user_input = (turn_context.activity.text or "").strip()
-            if not user_input:
-                await turn_context.send_activity("Будь ласка, надішліть текстове повідомлення.")
+            has_attachments = bool((turn_context.activity.attachments or []))
+            if not user_input and not has_attachments:
+                await turn_context.send_activity("Будь ласка, надішліть текст або файл(и).")
                 return
             
             conversation_key = get_conversation_key(turn_context.activity)
@@ -430,6 +573,12 @@ class TeamsLambdaBot:
             
             # Send initial typing indicator (within turn context)
             await turn_context.send_activity(Activity(type=ActivityTypes.typing))
+
+            # pull files (bytes or URLs) ----
+            files_bundle = await extract_files_from_activity(turn_context.activity, CONFIG)
+            if files_bundle["warnings"]:
+                for w in files_bundle["warnings"]:
+                    log.warning(f"[FILE WARNING] {w}")
             
             # Prepare payload for Lambda
             payload = {
@@ -442,7 +591,11 @@ class TeamsLambdaBot:
                 "metadata": {
                     "timestamp": str(turn_context.activity.timestamp),
                     "channel": "teams"
-                }
+                },
+
+                # files (base64) and/or urls for Lambda-side download
+                "files": files_bundle["files"],             # [{filename, content_type, size, b64}]
+                "file_urls": files_bundle["urls"]           # [{filename, content_type, download_url}]
             }
             
             # Start background processing
