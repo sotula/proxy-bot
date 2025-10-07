@@ -10,6 +10,9 @@ from typing import Dict, Optional, Any
 from flask import Flask, request, Response
 from dotenv import load_dotenv
 
+from botbuilder.schema.teams import FileConsentCard, FileInfoCard, FileUploadInfo
+from botbuilder.schema import Attachment, Activity, ActivityTypes, CardAction, ActionTypes, ChannelAccount
+
 from botbuilder.core import TurnContext
 from botbuilder.schema import Activity, ActivityTypes, ConversationReference
 from botbuilder.integration.aiohttp import (
@@ -23,6 +26,8 @@ import base64
 
 import aiohttp
 
+_pending_files: dict[str, dict] = {}  # { filename: {"raw": bytes, "content_type": str} }
+
 # -------------------- Logging --------------------
 logging.basicConfig(
     level=logging.DEBUG,  # Changed to DEBUG for troubleshooting
@@ -32,6 +37,7 @@ log = logging.getLogger("teams_lambda_bot")
 
 # -------------------- Configuration --------------------
 load_dotenv()
+
 
 class BotConfig:
     """Configuration class matching Bot Framework SDK expectations."""
@@ -150,7 +156,7 @@ class LambdaClient:
         signed_headers.setdefault("Connection", "keep-alive")
         return signed_headers
     
-    async def call_async(self, payload: Dict[str, Any]) -> str:
+    async def call_async(self, payload: Dict[str, Any]) -> dict:
         """Call Lambda Function URL with retry logic and proper error handling."""
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -166,75 +172,67 @@ class LambdaClient:
             except asyncio.TimeoutError:
                 log.warning(f"Lambda URL timeout on attempt {attempt + 1}")
                 if attempt == self.max_retries - 1:
-                    return "Вибачте, обробка запиту зайняла занадто багато часу. Спробуйте ще раз."
+                    return {"text": "Сталася неочікувана помилка обробки запиту.", "files": []}
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
 
             except aiohttp.ClientError as e:
                 log.error(f"Lambda URL client error on attempt {attempt + 1}: {e}")
                 if attempt == self.max_retries - 1:
-                    return f"Помилка з'єднання з сервісом: {str(e)}"
+                    return {"text": f"Помилка з'єднання з сервісом: {str(e)}", "files": []}
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
 
             except Exception as e:
                 log.exception(f"Unexpected error on attempt {attempt + 1}")
                 if attempt == self.max_retries - 1:
-                    return "Сталася неочікувана помилка обробки запиту."
+                    return {"text": "Сталася неочікувана помилка обробки запиту.", "files": []}
                 await asyncio.sleep(CONFIG.RETRY_DELAY * (attempt + 1))
 
-        return "Не вдалося обробити запит після кількох спроб."
+        return {"text": "Не вдалося обробити запит після кількох спроб.", "files": []}
     
-    async def _process_response(self, response: aiohttp.ClientResponse) -> str:
+    async def _process_response(self, response: aiohttp.ClientResponse) -> dict:
         """
-        Process Lambda Function URL response.
-        Function URLs use Lambda’s HTTP payload format (v2). Your handler usually returns:
-          {"statusCode": 200, "headers": {...}, "body": "..."}  (optionally isBase64Encoded)
+        Return {"text": str, "files": [{name,b64,content_type}]}
         """
         body = await response.text()
 
-        # 502 can happen if Lambda function itself errored; still parse body.
         if response.status >= 400:
-            log.error(f"Lambda URL returned error {response.status}: {body[:400]}")
-            # Try to extract Lambda-style error message
             try:
                 data = json.loads(body)
-                msg = data.get("errorMessage") or data.get("message")
-                if msg:
-                    return f"Сервіс повернув помилку {response.status}: {msg}"
+                msg = data.get("errorMessage") or data.get("message") or body
             except Exception:
-                pass
-            return f"Сервіс повернув помилку {response.status}. Спробуйте пізніше."
+                msg = body
+            return {"text": f"Сервіс повернув помилку {response.status}: {msg}", "files": []}
 
-        # Parse success path
         try:
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
-            # If you return raw text from Lambda, just relay it
-            return body or "Отримано порожню відповідь"
+            # Lambda returned plain text
+            return {"text": (body or "Отримано порожню відповідь"), "files": []}
 
-        # Handle standard Lambda URL proxy shape
+        # Lambda Proxy shape
         if isinstance(data, dict) and "statusCode" in data:
-            # Function might return base64-encoded body
             raw_body = data.get("body", "")
             if data.get("isBase64Encoded"):
                 try:
                     raw_body = base64.b64decode(raw_body or "").decode("utf-8", "ignore")
                 except Exception:
                     pass
-            # Your Lambda often wraps {"text": "..."} in body
             try:
-                inner = json.loads(raw_body)
-                if isinstance(inner, dict) and "text" in inner:
-                    return inner["text"]
-                return raw_body if raw_body else "Отримано порожню відповідь"
+                inner = json.loads(raw_body) if raw_body else {}
             except Exception:
-                return raw_body if raw_body else "Отримано порожню відповідь"
+                return {"text": (raw_body or "Отримано порожню відповідь"), "files": []}
 
-        # Direct JSON shape: {"text": "..."} (if your handler returns dict directly)
-        if isinstance(data, dict) and "text" in data:
-            return data["text"]
+            return {
+                "text": inner.get("text") or (raw_body if raw_body else "Отримано порожню відповідь"),
+                "files": inner.get("files") or []
+            }
+
+        # Direct JSON shape
+        if isinstance(data, dict):
+            return {"text": data.get("text") or "Отримано порожню відповідь", "files": data.get("files") or []}
 
         # Fallback
-        return json.dumps(data, ensure_ascii=False, indent=2)
+        return {"text": json.dumps(data, ensure_ascii=False, indent=2), "files": []}
 
 lambda_client = LambdaClient(CONFIG.LAMBDA_URL, CONFIG.LAMBDA_TIMEOUT, CONFIG.MAX_RETRY_ATTEMPTS)
 
@@ -364,17 +362,35 @@ class BackgroundWorker:
                 with contextlib.suppress(asyncio.CancelledError):
                     await typing_task
             
-            # Send final answer
-            if answer:
-                success = await self.messenger.send_message(reference_obj, answer)
-                if success:
-                    log.info("Successfully sent response to Teams")
-                else:
-                    log.error("Failed to send response to Teams")
-            else:
-                await self.messenger.send_message(
-                    reference_obj, 
-                    "Не вдалося отримати відповідь від сервісу."
+            if not answer:
+                await self.messenger.send_message(reference_obj, "Не вдалося отримати відповідь від сервісу.")
+                return
+
+            text = answer.get("text") or ""
+            files = answer.get("files") or []
+
+            # 1) Send the text
+            if text:
+                await self.messenger.send_message(reference_obj, text)
+
+            # 2) Send a consent card per file (personal chat)
+            # NOTE: File Consent works in 1:1 scope. If you want channel uploads, use Graph instead.
+            if files:
+                async def _send_cards(turn_context: TurnContext):
+                    for f in files:
+                        name = f.get("name") or "file"
+                        b64  = f.get("b64") or ""
+                        raw  = base64.b64decode(b64) if b64 else b""
+                        _pending_files[name] = {"raw": raw, "content_type": f.get("content_type") or "application/octet-stream"}
+                        att = _make_file_consent_attachment(name, len(raw))
+                        await turn_context.send_activity(Activity(type=ActivityTypes.message, attachments=[att]))
+
+                # Use proactive continue_conversation to send attachments
+                app_id = str(CONFIG.APP_ID) if CONFIG.APP_ID else ""
+                await adapter.continue_conversation(
+                    bot_app_id=app_id,
+                    reference=ProactiveMessenger._ensure_conversation_reference(reference_obj),
+                    callback=_send_cards
                 )
         
         except Exception as e:
@@ -595,6 +611,35 @@ async def extract_files_from_activity(activity: Activity, cfg: BotConfig) -> dic
                 out["warnings"].append(f"{fname}: Unexpected error {e}. Skipped.")
 
     return out
+
+
+
+def _make_file_consent_attachment(filename: str, size_bytes: int) -> Attachment:
+    card = FileConsentCard(
+        description="AI-generated file",
+        size_in_bytes=size_bytes,
+        accept_context={"fileName": filename},
+        decline_context={"fileName": filename},
+    )
+    return Attachment(
+        content_type="application/vnd.microsoft.teams.card.file.consent",
+        content=card,
+        name=filename,
+    )
+
+def _make_file_info_attachment(filename: str, url: str) -> Attachment:
+    # After upload, you send a FileInfoCard so user gets a proper file "chiclet"
+    info = FileInfoCard(
+        unique_id=None,  # optional
+        file_type=None,  # optional
+        # name is taken from Attachment.name below
+    )
+    return Attachment(
+        content_type="application/vnd.microsoft.teams.card.file.info",
+        content=info,
+        name=filename,
+        content_url=url,  # Teams renders from this URL
+    )
 
 
 # -------------------- Bot Implementation --------------------
