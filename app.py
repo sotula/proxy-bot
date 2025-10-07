@@ -3,6 +3,7 @@ import json
 import asyncio
 import threading
 import contextlib
+import json
 import logging
 from collections import defaultdict, deque
 from typing import Dict, Optional, Any
@@ -424,30 +425,67 @@ async def _download_with_limit(session: aiohttp.ClientSession, url: str, max_byt
         return b"".join(chunks)
 
 
+def _att_field(att, name, default=None):
+    """Get attribute whether `att` is a botbuilder Attachment object or a plain dict."""
+    if isinstance(att, dict):
+        return att.get(name, default)
+    return getattr(att, name, default)
+
+def _normalize_content(att):
+    """
+    Return (content_dict_or_value, is_dict). If content is a JSON string, parse it.
+    If parsing fails, return original string.
+    """
+    content = _att_field(att, "content")
+    if isinstance(content, str):
+        # Try to parse JSON-encoded content (Teams sometimes sends it as string)
+        try:
+            parsed = json.loads(content)
+            return parsed, isinstance(parsed, dict)
+        except Exception:
+            return content, False
+    return content, isinstance(content, dict)
+
 def _guess_name(att) -> str:
-    # Try multiple places where Teams puts file name
-    return (
-        getattr(att, "name", None)
-        or (att.content and att.content.get("fileName"))
-        or (att.name if hasattr(att, "name") else None)
-        or "file"
-    )
+    # Try several places for file name
+    name = _att_field(att, "name")
+    if name:
+        return name
+    content, is_dict = _normalize_content(att)
+    if is_dict and content:
+        for key in ("fileName", "filename", "name", "title"):
+            if key in content and content[key]:
+                return str(content[key])
+    # Try to infer from URL last path segment
+    url = _att_field(att, "content_url") or _att_field(att, "contentUrl")
+    if isinstance(url, str) and url.strip():
+        tail = url.rstrip("/").split("/")[-1]
+        if tail:
+            return tail
+    return "file"
 
 
 def _guess_content_type(att) -> str:
-    # Prefer explicit contentType; fall back to fileType from Teams payload
-    ct = getattr(att, "content_type", None) or (att.content and att.content.get("fileType"))
-    return ct or "application/octet-stream"
+    ct = _att_field(att, "content_type") or _att_field(att, "contentType")
+    if ct:
+        return ct
+    content, is_dict = _normalize_content(att)
+    if is_dict and content:
+        for key in ("fileType", "contentType", "mimeType"):
+            if key in content and content[key]:
+                return str(content[key])
+    # As a last resort
+    return "application/octet-stream"
 
 
 async def extract_files_from_activity(activity: Activity, cfg: BotConfig) -> dict:
     """
-    Returns {"files": [...], "warnings": [...], "urls": [...]}.
-    Each file item: { "filename", "content_type", "size", "b64" }
-    Each url  item: { "filename", "content_type", "download_url", "size": None }
+    Returns {"files": [...], "warnings": [...], "urls": [...]}
+    file item: { "filename", "content_type", "size", "b64" }
+    url  item: { "filename", "content_type", "download_url", "size": None }
     """
     out = {"files": [], "warnings": [], "urls": []}
-    attachments = activity.attachments or []
+    attachments = getattr(activity, "attachments", None) or []
     if not attachments:
         return out
 
@@ -456,53 +494,61 @@ async def extract_files_from_activity(activity: Activity, cfg: BotConfig) -> dic
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for att in attachments:
+            # Capture basic fields up-front so we can log safely even if something fails later
+            try:
+                fname = _guess_name(att)
+            except Exception:
+                fname = "file"
+
             try:
                 ct = _guess_content_type(att)
-                fname = _guess_name(att)
+                content, is_dict = _normalize_content(att)
+                content_url = _att_field(att, "content_url") or _att_field(att, "contentUrl")
 
-                # Teams native file message → downloadUrl with no auth needed
-                if ct == "application/vnd.microsoft.teams.file.download.info" and att.content:
-                    download_url = att.content.get("downloadUrl")
-                    inferred_type = att.content.get("fileType")
-                    if inferred_type and inferred_type != ct:
-                        ct = inferred_type
+                # Teams native file attachment (download.info) → content dict has downloadUrl
+                if ct == "application/vnd.microsoft.teams.file.download.info" and is_dict and content:
+                    download_url = content.get("downloadUrl")
+                    inferred_type = content.get("fileType")
+                    if inferred_type:  # Sometimes Teams places actual mime/ext here
+                        ct = inferred_type if "/" in inferred_type else ct
 
-                    if cfg.ALLOWED_MIME and ct not in cfg.ALLOWED_MIME and "application/" in ct:
-                        out["warnings"].append(f"{fname}: MIME '{ct}' not in allowed list; sending URL instead.")
-                        out["urls"].append({
-                            "filename": fname, "content_type": ct, "download_url": download_url
-                        })
-                        continue
-
-                    try:
-                        data = await _download_with_limit(session, download_url, cfg.MAX_FILE_BYTES)
-                        total_bytes += len(data)
-                        if total_bytes > cfg.MAX_TOTAL_BYTES:
-                            raise ValueError("Total files exceed allowed combined limit.")
-                        out["files"].append({
-                            "filename": fname,
-                            "content_type": ct,
-                            "size": len(data),
-                            "b64": base64.b64encode(data).decode("ascii")
-                        })
-                    except ValueError as size_err:
-                        if cfg.FALLBACK_URLS_IF_TOO_BIG:
-                            out["warnings"].append(f"{fname}: {size_err}. Passing URL instead.")
-                            out["urls"].append({
-                                "filename": fname, "content_type": ct, "download_url": download_url
+                    if cfg.ALLOWED_MIME and ct in cfg.ALLOWED_MIME:
+                        # Try to download and embed (respect size caps)
+                        try:
+                            data = await _download_with_limit(session, download_url, cfg.MAX_FILE_BYTES)
+                            total_bytes += len(data)
+                            if total_bytes > cfg.MAX_TOTAL_BYTES:
+                                raise ValueError("Total files exceed allowed combined limit.")
+                            out["files"].append({
+                                "filename": fname,
+                                "content_type": ct,
+                                "size": len(data),
+                                "b64": base64.b64encode(data).decode("ascii"),
                             })
-                        else:
-                            out["warnings"].append(f"{fname}: {size_err}. Skipped.")
+                        except Exception as size_err:
+                            if cfg.FALLBACK_URLS_IF_TOO_BIG:
+                                out["warnings"].append(f"{fname}: {size_err}. Passing URL instead.")
+                                out["urls"].append({
+                                    "filename": fname,
+                                    "content_type": ct,
+                                    "download_url": download_url,
+                                })
+                            else:
+                                out["warnings"].append(f"{fname}: {size_err}. Skipped.")
+                    else:
+                        # Not allowed or unknown → pass URL
+                        if cfg.ALLOWED_MIME and "/" in ct and ct not in cfg.ALLOWED_MIME:
+                            out["warnings"].append(f"{fname}: MIME '{ct}' not allowed; sending URL.")
+                        out["urls"].append({
+                            "filename": fname,
+                            "content_type": ct,
+                            "download_url": download_url,
+                        })
 
-                # Generic attachment with content_url (may require auth on non-Teams channels)
-                elif getattr(att, "content_url", None):
-                    download_url = att.content_url
-
-                    # We try no-auth first; Teams 'v3/attachments' usually needs auth, but the
-                    # 'file.download.info' path above is the common Teams route and needs no auth.
-                    # If this fails in your tenant, prefer the 'download.info' path.
+                # Generic attachment with direct content_url (common for images/others)
+                elif isinstance(content_url, str) and content_url.strip():
                     try:
-                        data = await _download_with_limit(session, download_url, cfg.MAX_FILE_BYTES)
+                        data = await _download_with_limit(session, content_url, cfg.MAX_FILE_BYTES)
                         total_bytes += len(data)
                         if total_bytes > cfg.MAX_TOTAL_BYTES:
                             raise ValueError("Total files exceed allowed combined limit.")
@@ -510,22 +556,43 @@ async def extract_files_from_activity(activity: Activity, cfg: BotConfig) -> dic
                             "filename": fname,
                             "content_type": ct,
                             "size": len(data),
-                            "b64": base64.b64encode(data).decode("ascii")
+                            "b64": base64.b64encode(data).decode("ascii"),
                         })
                     except Exception as e:
                         if cfg.FALLBACK_URLS_IF_TOO_BIG:
                             out["warnings"].append(f"{fname}: {e}. Passing URL instead.")
                             out["urls"].append({
-                                "filename": fname, "content_type": ct, "download_url": download_url
+                                "filename": fname,
+                                "content_type": ct,
+                                "download_url": content_url,
                             })
                         else:
                             out["warnings"].append(f"{fname}: {e}. Skipped.")
 
+                # If we have inline base64 in content (rare), support it
+                elif is_dict and content and isinstance(content.get("base64"), str):
+                    try:
+                        raw = base64.b64decode(content["base64"], validate=True)
+                        if len(raw) > cfg.MAX_FILE_BYTES:
+                            raise ValueError("Inline base64 exceeds allowed size.")
+                        total_bytes += len(raw)
+                        if total_bytes > cfg.MAX_TOTAL_BYTES:
+                            raise ValueError("Total files exceed allowed combined limit.")
+                        out["files"].append({
+                            "filename": fname,
+                            "content_type": ct,
+                            "size": len(raw),
+                            "b64": content["base64"],
+                        })
+                    except Exception as e:
+                        out["warnings"].append(f"{fname}: invalid inline base64 ({e}). Skipped.")
+
                 else:
-                    out["warnings"].append(f"{_guess_name(att)}: Unsupported attachment shape; skipped.")
+                    out["warnings"].append(f"{fname}: Unsupported attachment shape; skipped.")
 
             except Exception as e:
-                out["warnings"].append(f"{_guess_name(att)}: Unexpected error {e}. Skipped.")
+                # DO NOT call _guess_name here again; we already computed fname safely above
+                out["warnings"].append(f"{fname}: Unexpected error {e}. Skipped.")
 
     return out
 
