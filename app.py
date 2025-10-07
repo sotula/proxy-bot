@@ -17,9 +17,9 @@ from botbuilder.integration.aiohttp import (
     ConfigurationBotFrameworkAuthentication,
 )
 import base64
-# from botocore.session import get_session as boto_get_session
-# from botocore.auth import SigV4Auth
-# from botocore.awsrequest import AWSRequest
+from botocore.session import get_session as boto_get_session
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 
 import aiohttp
 
