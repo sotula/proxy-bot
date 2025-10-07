@@ -17,9 +17,9 @@ from botbuilder.integration.aiohttp import (
     ConfigurationBotFrameworkAuthentication,
 )
 import base64
-from botocore.session import get_session as boto_get_session
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
+# from botocore.session import get_session as boto_get_session
+# from botocore.auth import SigV4Auth
+# from botocore.awsrequest import AWSRequest
 
 import aiohttp
 
@@ -125,7 +125,7 @@ class LambdaClient:
         self.timeout = timeout
         self.max_retries = max_retries
         # Optional auth for Function URL
-        self.auth_mode = os.getenv("LAMBDA_URL_AUTH", "AWS_IAM").upper()  # "NONE" or "AWS_IAM"
+        self.auth_mode = os.getenv("LAMBDA_URL_AUTH", "NONE").upper()  # "NONE" or "AWS_IAM"
         self.region = os.getenv("AWS_REGION", "eu-central-1")
 
     def _sign_if_needed(self, body_bytes: bytes) -> dict:
