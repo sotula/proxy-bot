@@ -653,6 +653,50 @@ class TeamsLambdaBot:
     async def on_turn(self, turn_context: TurnContext):
         """Handle incoming message from Teams."""
         try:
+            # --- Handle file consent callbacks ---
+            if turn_context.activity.type == ActivityTypes.invoke and getattr(turn_context.activity, "name", "") == "fileConsent/invoke":
+                val = turn_context.activity.value or {}
+                action = val.get("action")  # "accept" | "decline"
+                context = val.get("context") or {}
+                filename = context.get("fileName") or "file"
+
+                if action == "accept":
+                    upload_info = val.get("uploadInfo") or {}
+                    upload_url = upload_info.get("uploadUrl")
+                    if not upload_url:
+                        await turn_context.send_activity("Не отримав uploadUrl від Teams.")
+                        return
+
+                    # We saved pending files to memory (see step 4) – fetch raw by filename
+                    pending = _pending_files.pop(filename, None)
+                    if not pending:
+                        await turn_context.send_activity("Не знайшов файл для завантаження (таймаут або вже завантажено).")
+                        return
+
+                    raw = pending["raw"]
+                    # PUT bytes to uploadUrl
+                    async with aiohttp.ClientSession() as s:
+                        # Microsoft requires PUT with the exact byte size
+                        headers = {
+                            "Content-Length": str(len(raw)),
+                            "Content-Range": f"bytes 0-{len(raw)-1}/{len(raw)}"
+                        }
+                        async with s.put(upload_url, data=raw, headers=headers) as resp:
+                            if resp.status not in (200, 201):
+                                txt = await resp.text()
+                                await turn_context.send_activity(f"Не вдалося завантажити файл ({resp.status}): {txt[:200]}")
+                                return
+
+                    # Send FileInfo card so user gets the file
+                    file_consent_result_url = upload_info.get("contentUrl") or upload_info.get("name")  # Teams returns contentUrl
+                    finfo = _make_file_info_attachment(filename, file_consent_result_url)
+                    await turn_context.send_activity(Activity(type=ActivityTypes.message, attachments=[finfo]))
+                    return
+
+                else:
+                    await turn_context.send_activity(f"Користувач відхилив файл: {filename}")
+                    return
+
             # Only process message activities
             if turn_context.activity.type != ActivityTypes.message:
                 log.info(f"Ignoring non-message activity: {turn_context.activity.type}")
